@@ -1,2 +1,2 @@
-# mkDDez
-make dd vps ez 4 myself
+# GoGFW
+MAKE VPS GO GFW EZ
