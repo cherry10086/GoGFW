@@ -1,0 +1,2 @@
+# Dollar references inside single-quoted snippets belong to awk/jq programs.
+disable=SC2016

@@ -1,0 +1,114 @@
+name: vps-proxy-tune CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_systemd_vm:
+        description: Run the destructive throwaway systemd VM suite
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  static-unit-cli:
+    name: ${{ matrix.image }} / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12
+            runner: ubuntu-24.04
+            arch: x86_64
+          - image: debian:13
+            runner: ubuntu-24.04
+            arch: x86_64
+          - image: ubuntu:22.04
+            runner: ubuntu-24.04
+            arch: x86_64
+          - image: ubuntu:24.04
+            runner: ubuntu-24.04
+            arch: x86_64
+          - image: ubuntu:26.04
+            runner: ubuntu-24.04
+            arch: x86_64
+          - image: debian:12
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+          - image: debian:13
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+          - image: ubuntu:22.04
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+          - image: ubuntu:24.04
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+          - image: ubuntu:26.04
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash ca-certificates coreutils diffutils findutils gawk grep \
+            hostname iproute2 iputils-ping jq kmod procps sed shellcheck \
+            util-linux
+      - name: Syntax and ShellCheck
+        run: |
+          bash -n vps-proxy-tune.sh tests/test_unit.sh tests/integration_netns.sh tests/integration_systemd_vm.sh tests/integration_systemd_reboot.sh
+          shellcheck -x vps-proxy-tune.sh tests/test_unit.sh tests/integration_netns.sh tests/integration_systemd_vm.sh tests/integration_systemd_reboot.sh
+      - name: Unit tests
+        run: bash tests/test_unit.sh
+      - name: CLI JSON smoke contract
+        run: |
+          bash vps-proxy-tune.sh audit --json --dry-run > audit.json
+          jq -e '.schema_version == "2" and .outcome == "ok" and has("reason_code")' audit.json
+          bash vps-proxy-tune.sh deps check --phase common --json > deps.json
+          jq -e '.schema_version == "2" and has("outcome") and has("reason_code") and has("missing_commands")' deps.json
+          set +e
+          bash vps-proxy-tune.sh verify --dry-run --json > verify-dry-run.json 2> verify-dry-run.err
+          verify_rc=$?
+          set -e
+          test "$verify_rc" -ne 0
+          jq -e '.schema_version == "2" and .outcome == "failed" and has("reason_code")' verify-dry-run.json
+
+  privileged-netns:
+    name: privileged Linux netns/netem
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install netns test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bash ca-certificates coreutils diffutils findutils gawk grep \
+            hostname iproute2 iperf3 iputils-ping jq kmod procps sed \
+            util-linux
+      - name: Run isolated network test
+        env:
+          VPS_TUNE_REQUIRE_NETNS: "1"
+        run: sudo -E bash tests/integration_netns.sh
+
+  systemd-vm:
+    name: throwaway privileged systemd VM suite
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_systemd_vm }}
+    # This label is intentionally supplied by the project’s disposable Debian/
+    # Ubuntu VM farm. GitHub-hosted runners cannot prove PID1/systemd reboot,
+    # timeout rollback, or network-online ordering safely.
+    runs-on: [self-hosted, linux, systemd-vm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run systemd VM integration suite
+        env:
+          VPS_TUNE_THROWAWAY_VM: "1"
+        run: sudo -E bash tests/integration_systemd_vm.sh
