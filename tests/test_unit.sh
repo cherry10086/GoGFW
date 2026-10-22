@@ -1103,6 +1103,18 @@ assert_failure 'baseline cleanup failure leaves an explicit detectable marker' \
     assert_success 'qdisc rollback captures and validates an allowlisted replay spec' \
         unit_qdisc_restore_spec
 
+    unit_pfifo_fast_replay_uses_kernel_defaults() (
+        local observed_tc_args="" IFS=' '
+        tc() { observed_tc_args="$*"; [[ "$*" == 'qdisc replace dev test0 root pfifo_fast' ]]; }
+        qdisc_replace_from_spec test0 'pfifo_fast bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1' || return 1
+        [[ "$observed_tc_args" == 'qdisc replace dev test0 root pfifo_fast' ]] || return 1
+        observed_tc_args=""
+        if qdisc_replace_from_spec test0 'pfifo_fast bands 3 priomap 0 0 0'; then return 1; fi
+        [[ -z "$observed_tc_args" ]]
+    )
+    assert_success 'pfifo_fast replay omits display-only options and still rejects unsafe specs' \
+        unit_pfifo_fast_replay_uses_kernel_defaults
+
     unit_qdisc_retry() (
         local observed_attempts=0
         restore_transaction() {

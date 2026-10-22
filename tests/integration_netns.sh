@@ -144,9 +144,9 @@ ip netns exec "${client_ns}" env VPS_TUNE_LIB_ONLY=1 TUNER="${TUNER}" DEV="${cli
 
 # Applying half of the target delay on each endpoint yields an approximately
 # 90 ms RTT path; a small endpoint loss exercises the quality classifier.
-ip netns exec "${client_ns}" tc qdisc add dev "${client_dev}" root \
+ip netns exec "${client_ns}" tc qdisc replace dev "${client_dev}" root \
     netem delay 45ms 5ms distribution normal loss 0.2% rate 50mbit
-ip netns exec "${server_ns}" tc qdisc add dev "${server_dev}" root \
+ip netns exec "${server_ns}" tc qdisc replace dev "${server_dev}" root \
     netem delay 45ms 5ms distribution normal loss 0.2% rate 50mbit
 
 if ! ip netns exec "${client_ns}" ping -q -c 2 -W 2 "${server_ip}" >/dev/null 2>&1; then

@@ -5318,6 +5318,9 @@ qdisc_replace_from_spec() {
     [[ "$iface" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || return 1
     qdisc_spec_is_safe "$spec" || return 1
     IFS=' ' read -r -a args <<< "$spec"
+    # pfifo_fast reports bands/priomap, but tc has no option parser for them.
+    # The exact default map was validated above; instantiate its kernel defaults.
+    if [[ "${args[0]}" == pfifo_fast ]]; then args=(pfifo_fast); fi
     tc qdisc replace dev "$iface" root "${args[@]}"
 }
 
