@@ -418,6 +418,46 @@ if [[ -d "${parse_tmp}" ]]; then
     assert_success 'sysctl scan honors basename priority and /dev/null masks' \
         unit_sysctl_mask_and_priority
 
+    unit_sysctl_supported_syntax() (
+        local case_name="$1" definition="$2" expected_key="${3:-}"
+        local root="${safety_dir}/sysctl-syntax-${case_name}" definitions
+        mkdir -p "${root}/etc/sysctl.d" "${root}/run/sysctl.d" || return 1
+        printf '%s\n' "$definition" > "${root}/etc/sysctl.d/60-example.conf" || return 1
+        ETC_ROOT="${root}/etc"
+        RUN_ROOT="${root}/run"
+        SYSCTL_FILE="${root}/etc/sysctl.d/90-vps-proxy-tune.conf"
+        definitions=$(scan_sysctl_definitions) || return 1
+        if [[ -z "$expected_key" ]]; then
+            [[ -z "$definitions" ]]
+        else
+            [[ "$definitions" == $'local\t'"$expected_key"$'\t'"${root}/etc/sysctl.d/60-example.conf"$'\t4096' ]]
+        fi
+    )
+    assert_success 'sysctl scan accepts distribution interface globs and exclusions' \
+        unit_sysctl_supported_syntax interface $'; distro comment\nnet.ipv4.conf.*.rp_filter = 2\n-net.ipv4.conf.all.rp_filter'
+    assert_success 'sysctl scan retains a wildcard assignment matching a managed key' \
+        unit_sysctl_supported_syntax star 'net.*.tcp_max_syn_backlog = 4096' net.ipv4.tcp_max_syn_backlog
+    assert_success 'sysctl scan retains bracket and question-mark glob matches' \
+        unit_sysctl_supported_syntax bracket 'net.ipv[46].tcp_max_syn_backlo? = 4096' net.ipv4.tcp_max_syn_backlog
+    assert_failure 'sysctl scan rejects malformed bracket patterns' \
+        unit_sysctl_supported_syntax malformed 'net.ipv[4.tcp_max_syn_backlog = 4096'
+
+    unit_sysctl_readable_link() (
+        local root="${safety_dir}/sysctl-link" definitions
+        mkdir -p "${root}/etc/sysctl.d" "${root}/run/sysctl.d" || return 1
+        printf 'net.core.rmem_max = 4096\n' > "${root}/etc/sysctl.conf" || return 1
+        ln -s ../sysctl.conf "${root}/etc/sysctl.d/99-sysctl.conf" || return 1
+        ETC_ROOT="${root}/etc"
+        RUN_ROOT="${root}/run"
+        SYSCTL_FILE="${root}/etc/sysctl.d/90-vps-proxy-tune.conf"
+        definitions=$(scan_sysctl_definitions) || return 1
+        [[ "$definitions" == *"${root}/etc/sysctl.d/99-sysctl.conf"* ]] || return 1
+        rm -- "${root}/etc/sysctl.conf" || return 1
+        if scan_sysctl_definitions >/dev/null; then return 1; fi
+    )
+    assert_success 'sysctl scan follows readable config links and rejects dangling ones' \
+        unit_sysctl_readable_link
+
     unit_sysctl_semicolon_is_not_a_comment() (
         local root="${safety_dir}/sysctl-semicolon"
         mkdir -p "${root}/etc/sysctl.d" "${root}/lib/sysctl.d" "${root}/usr/lib/sysctl.d" \
@@ -968,6 +1008,7 @@ assert_failure 'baseline cleanup failure leaves an explicit detectable marker' \
 
     unit_route_direct() (
         ip() {
+            [[ "$2" != -o ]] || set -- "$1" "${@:3}"
             if [[ "$4" == fibmatch ]]; then
                 [[ "$5" == 203.0.113.1 ]] || return 1
             else
@@ -988,6 +1029,37 @@ assert_failure 'baseline cleanup failure leaves an explicit detectable marker' \
     )
     assert_success 'route check accepts one direct nexthop' unit_route_direct
     assert_failure 'route check rejects an ECMP nexthop set' unit_route_ecmp
+
+    unit_route_cache_metadata() (
+        ip() {
+            if [[ "$2" == -o ]]; then
+                printf '203.0.113.1 via 192.0.2.1 dev test0 src 192.0.2.2 \\ cache\n'
+            else
+                printf '203.0.113.1 via 192.0.2.1 dev test0 src 192.0.2.2\n    cache\n'
+            fi
+        }
+        route_is_unambiguous 4 203.0.113.1 192.0.2.2
+    )
+    unit_route_source_fingerprint() (
+        ip() {
+            if [[ "${5:-}" == from ]]; then
+                printf '203.0.113.1 from 192.0.2.2 via 192.0.2.1 dev test0 uid 0\n    cache\n'
+            else
+                printf '203.0.113.1 via 192.0.2.1 dev test0 src 192.0.2.2 uid 0\n    cache\n'
+            fi
+        }
+        local initial_details initial_hash bound_hash
+        initial_details=$(route_details 4 203.0.113.1) || return 1
+        initial_hash=$(printf '%s' "$initial_details" | sha256_text) || return 1
+        bound_hash=$(route_fingerprint 4 203.0.113.1 192.0.2.2) || return 1
+        [[ "$initial_hash" == "$bound_hash" ]]
+    )
+    assert_success 'route check accepts cache metadata within a single record' unit_route_cache_metadata
+    assert_success 'explicit source lookup preserves the frozen route fingerprint' unit_route_source_fingerprint
+    assert_failure 'one-line ECMP output remains ambiguous' route_output_has_unique_nexthop \
+        '203.0.113.0/24 nexthop via 192.0.2.1 dev test0 weight 1\ nexthop via 192.0.2.5 dev test1 weight 1'
+    assert_failure 'multiple independent route records remain ambiguous' route_output_has_unique_nexthop \
+        $'203.0.113.1 dev test0\n203.0.113.1 dev test1'
 
     unit_qdisc_default() (
         SYS_ROOT="${safety_dir}/sys"

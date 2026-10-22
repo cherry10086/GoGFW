@@ -788,9 +788,14 @@ collect_sysctl_files() {
             [[ "$name" =~ ^[A-Za-z0-9_.-]+[.]conf$ ]] || return 1
             if [[ -L "$file" ]]; then
                 real=$(readlink -f -- "$file" 2>/dev/null || true)
-                [[ "$real" == /dev/null ]] || return 1
-                effective[$name]=__MASKED__
-                continue
+                if [[ "$real" == /dev/null ]]; then
+                    effective[$name]=__MASKED__
+                    continue
+                fi
+                # Distribution files may link to a readable configuration (for
+                # example 99-sysctl.conf -> ../sysctl.conf). This scan is read-only;
+                # owned state and write targets retain their stricter link rules.
+                [[ -n "$real" && -f "$real" && -r "$real" ]] || return 1
             fi
             [[ -f "$file" && -r "$file" ]] || return 1
             # Later directories have higher sysctl.d priority in this ordered
@@ -822,7 +827,8 @@ is_target_sysctl_key() {
 }
 
 scan_sysctl_definitions() {
-    local file line key value normalized scope
+    local file line key value normalized scope target exclusion
+    local key_pattern='^-?([A-Za-z0-9_./*?-]|\[!?[A-Za-z0-9_:-]+\])+$'
     collect_sysctl_files || return 1
     for file in "${SYSCTL_SCAN_FILES[@]}"; do
         [[ "$file" == "$SYSCTL_FILE" ]] && continue
@@ -833,27 +839,42 @@ scan_sysctl_definitions() {
         if ! while IFS= read -r line || [[ -n "$line" ]]; do
             line=${line%%#*}; line=$(trim "$line")
             [[ -n "$line" ]] || continue
+            [[ "$line" != ';'* ]] || continue
             # sysctl.d has no shell-style semicolon comment syntax.  Treating
             # it as a comment would hide a second assignment (or arbitrary
             # malformed text) and could make the conflict check incomplete.
             [[ "$line" != *';'* ]] || return 1
+            exclusion=0
             if [[ "$line" == *=* ]]; then
                 key=$(trim "${line%%=*}")
                 value=$(trim "${line#*=}")
             else
                 key=${line%%[[:space:]]*}
                 value=$(trim "${line#"$key"}")
-                [[ -n "$value" ]] || return 1
+                if [[ -z "$value" && "$key" == -* ]]; then
+                    # A bare -key excludes it from glob assignments; it does
+                    # not itself assign a value (systemd sysctl.d syntax).
+                    exclusion=1
+                else
+                    [[ -n "$value" ]] || return 1
+                fi
             fi
             # Validate every effective definition before filtering to the
             # managed allow-list.  Otherwise a malformed non-target line could
             # be silently ignored while the same file is used as a conflict
             # authority for a later apply.
-            [[ -n "$key" && -n "$value" && "$key" =~ ^-?[A-Za-z0-9_./]+$ &&
+            [[ -n "$key" && "$key" != --* && "$key" =~ $key_pattern &&
                "$value" != *'='* && "$value" != *$'\t'* && "$value" != *$'\r'* ]] || return 1
+            (( exclusion == 0 )) || continue
+            [[ -n "$value" ]] || return 1
             key=${key#-}; normalized=${key//\//.}; normalized=${normalized#.}
-            is_target_sysctl_key "$normalized" || continue
-            printf '%s\t%s\t%s\t%s\n' "$scope" "$normalized" "$file" "$value"
+            # Conservatively report every managed key matched by a glob. This
+            # keeps wildcard definitions visible to the apply conflict gate.
+            while IFS= read -r target; do
+                # shellcheck disable=SC2053 # Match the validated sysctl glob intentionally.
+                [[ "$target" == $normalized ]] || continue
+                printf '%s\t%s\t%s\t%s\n' "$scope" "$target" "$file" "$value"
+            done < <(target_sysctl_keys)
         done < "$file"; then
             return 1
         fi
@@ -1547,8 +1568,10 @@ resolve_peer_host() {
 }
 
 normalize_route() {
-    awk '{
-        dst=$1; via=""; dev=""; src=""; table="main"
+    # A lookup with `from` may omit the redundant `src` field. Preserve the
+    # explicitly requested source so its fingerprint matches the initial lookup.
+    awk -v requested_source="${1:-}" '{
+        dst=$1; via=""; dev=""; src=requested_source; table="main"
         for(i=1;i<=NF;i++) {
             if($i=="via") via=$(i+1)
             else if($i=="dev") dev=$(i+1)
@@ -1564,7 +1587,7 @@ route_details() {
     local -a args=(ip "-$family" route get "$ip_addr")
     [[ -z "$source" ]] || args+=(from "$source")
     output=$("${args[@]}" 2>/dev/null) || return 1
-    printf '%s\n' "$output" | head -n1 | normalize_route
+    printf '%s\n' "$output" | head -n1 | normalize_route "$source"
 }
 
 route_output_has_unique_nexthop() {
@@ -1585,8 +1608,11 @@ route_output_has_unique_nexthop() {
 
 route_is_unambiguous() {
     local family="$1" ip_addr="$2" source="${3:-}" selected fibmatch
-    local -a args=(ip "-$family" route get "$ip_addr")
-    local -a fib_args=(ip "-$family" route get fibmatch "$ip_addr")
+    # Cache metadata can occupy a second line in normal iproute2 output. One
+    # record per line keeps that formatting distinct from multiple route records;
+    # explicit nexthop/weight and nexthop-group checks remain fail-closed below.
+    local -a args=(ip "-$family" -o route get "$ip_addr")
+    local -a fib_args=(ip "-$family" -o route get fibmatch "$ip_addr")
     [[ -z "$source" ]] || args+=(from "$source")
     [[ -z "$source" ]] || fib_args+=(from "$source")
     selected=$("${args[@]}" 2>/dev/null) || return 1
@@ -3009,7 +3035,7 @@ write_plan_json() {
 }
 
 cmd_plan() {
-    local run_id="" arg run_dir metrics plan_file proposed warnings_file conflicts_file preview_dir plan_output
+    local run_id="" arg run_dir metrics plan_file proposed warnings_file conflicts_file preview_dir="" plan_output
     local confidence mbps rtt ram base_target cap mem_available memory_headroom_ok=1 current value first second third target
     local desired key extra
     local listen_windows syn_windows syn_cookies_delta syn_drop_delta syncookies_delta syn_evidence=0
@@ -3220,10 +3246,10 @@ cmd_plan() {
         [[ ! -s "$warnings_file" ]] || { printf '警告:\n'; sed 's/^/  - /' "$warnings_file"; }
     fi
     if [[ -n "$preview_dir" ]]; then
-            rm -rf -- "$preview_dir"
-            PLAN_PREVIEW_DIR=""
-            trap - EXIT INT TERM HUP
-        fi
+        rm -rf -- "$preview_dir"
+        PLAN_PREVIEW_DIR=""
+        trap - EXIT INT TERM HUP
+    fi
 }
 
 require_real_apply_roots() {

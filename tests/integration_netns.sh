@@ -38,8 +38,17 @@ skip() {
 
 cleanup() {
     local exit_status="${1:-1}"
+    local report_file
 
     trap - EXIT INT TERM HUP
+    if (( exit_status != 0 )) && [[ -n "${tmp_dir}" && -d "${tmp_dir}" ]]; then
+        for report_file in measure.json measure-v6.json; do
+            if [[ -s "${tmp_dir}/${report_file}" ]]; then
+                printf 'FAIL: isolated %s report:\n' "${report_file}" >&2
+                cat -- "${tmp_dir}/${report_file}" >&2 || true
+            fi
+        done
+    fi
     if [[ -n "${iperf_pid}" ]]; then
         kill "${iperf_pid}" 2>/dev/null || true
         wait "${iperf_pid}" 2>/dev/null || true
@@ -68,9 +77,10 @@ cleanup() {
 }
 trap 'cleanup $?' EXIT
 trap 'exit 130' INT TERM HUP
+trap 'printf "FAIL: integration command at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 for command_name in \
-    bash basename chmod cmp diff env find ip iperf3 jq mkdir mktemp od ping rm \
+    bash basename cat chmod cmp diff env find ip iperf3 jq mkdir mktemp od ping rm \
     sed sha256sum sleep sort sysctl tc tr; do
     command -v "${command_name}" >/dev/null 2>&1 || skip "missing test dependency: ${command_name}"
 done
@@ -243,12 +253,14 @@ snapshot_protected_state() {
 
 readonly isolated_state="${tmp_dir}/state"
 readonly isolated_run="${tmp_dir}/run"
-mkdir -p "${isolated_state}" "${isolated_run}"
-chmod 0700 "${isolated_state}" "${isolated_run}"
+readonly isolated_atomic_state="${tmp_dir}/atomic-state"
+mkdir -p "${isolated_state}" "${isolated_run}" "${isolated_atomic_state}"
+chmod 0700 "${isolated_state}" "${isolated_run}" "${isolated_atomic_state}"
 
 printf 'atomic source\n' >"${tmp_dir}/atomic-source"
-env VPS_TUNE_LIB_ONLY=1 TUNER="${TUNER}" STATE_ROOT="${isolated_state}" \
-    SOURCE_FILE="${tmp_dir}/atomic-source" TARGET_FILE="${isolated_state}/atomic-target" \
+# Keep helper artifacts separate from the strict state layout exercised by plan.
+env VPS_TUNE_LIB_ONLY=1 TUNER="${TUNER}" STATE_ROOT="${isolated_atomic_state}" \
+    SOURCE_FILE="${tmp_dir}/atomic-source" TARGET_FILE="${isolated_atomic_state}/atomic-target" \
     bash -c '
         set -euo pipefail
         source "${TUNER}"
@@ -298,6 +310,7 @@ jq -e --arg address "${server_ip}" --arg source "${client_ip}" '
     $doc.path.peers[0].source_address == $source and
     $doc.path.peers[0].family == 4 and
     $doc.path.peers[0].route_unambiguous == true and
+    $doc.path.peers[0].route_stable == true and
     ($doc.path.peers[0].route_fingerprint | test("^[0-9a-f]{64}$")) and
     $doc.metrics.rtt_p95_ms >= 50 and
     $doc.metrics.effective_mbps > 0 and
@@ -341,6 +354,7 @@ jq -e --arg address "${server_ip6}" --arg source "${client_ip6}" '
     $doc.path.peers[0].source_address == $source and
     $doc.path.peers[0].family == 6 and
     $doc.path.peers[0].route_unambiguous == true and
+    $doc.path.peers[0].route_stable == true and
     ($doc.path.peers[0].route_fingerprint | test("^[0-9a-f]{64}$")) and
     $doc.metrics.effective_mbps > 0 and
     ($doc.metrics.verification_budget | type) == "object" and
