@@ -63,7 +63,7 @@ err() { printf '[ERROR] %s\n' "$*" >&2; }
 reason_code_for_message() {
     local message="$*"
     case "$message" in
-        *缺少*命令*|*缺少*依赖*|*缺失命令*|*依赖安装*|*依赖*|*需要 systemctl*|*需要 systemd*|*apt-get*|*dpkg*|*找不到*systemctl*|*找不到*systemd*) printf 'dependency_missing\n' ;;
+        *缺少*命令*|*缺少*依赖*|*缺失命令*|*依赖安装*|*依赖*|*'需要 systemctl'*|*'需要 systemd'*|*apt-get*|*dpkg*|*找不到*systemctl*|*找不到*systemd*) printf 'dependency_missing\n' ;;
         *恢复*|*守卫*|*rollback-failed*) printf 'recovery_pending\n' ;;
         *qdisc*|*队列*|*白名单拓扑*) printf 'qdisc_unsafe\n' ;;
         *LimitNOFILE*|*服务*drop-in*|*服务不存在*) printf 'service_limit_unknown\n' ;;
@@ -417,7 +417,7 @@ netns_inode() {
 }
 
 run_measurement_context_is_current() {
-    local run_dir="$1" metrics stored current now age
+    local run_dir="$1" metrics stored current age
     metrics="$run_dir/metrics.tsv"
     [[ -r "$metrics" ]] || return 1
     stored=$(metric_get "$metrics" BOOT_ID 2>/dev/null || true)
@@ -1175,7 +1175,7 @@ install_dependencies() {
         apt_temp_abort '无法创建 APT 隔离目录'; return 1;
     }
     sources="$temp/official.list"
-    if ! {
+    {
         if [[ "$id" == debian ]]; then
             keyring=/usr/share/keyrings/debian-archive-keyring.gpg
             printf 'deb [signed-by=%s] https://deb.debian.org/debian %s main\n' "$keyring" "$codename"
@@ -1386,15 +1386,17 @@ cmd_deps() {
     if (( JSON_OUTPUT )); then
         printf '{"schema_version":%s,"phase":%s,"outcome":%s,"reason_code":%s,"missing_commands":' \
             "$(json_string "$SCHEMA_VERSION")" "$(json_string "$phase")" \
-            "$([[ -z "$missing" ]] && json_string ok || json_string blocked)" \
-            "$([[ -z "$missing" ]] && json_string dependencies_installed || json_string dependency_missing)"
+            "$(if [[ -z "$missing" ]]; then json_string ok; else json_string blocked; fi)" \
+            "$(if [[ -z "$missing" ]]; then json_string dependencies_installed; else json_string dependency_missing; fi)"
         json_lines_array "$missing"
         printf ',"rollback_status":"not-applicable"}\n'
         JSON_ERROR_EMITTED=1
     else
-        [[ -z "$missing" ]] && printf '依赖阶段 %s 已满足。\n' "$phase" || {
+        if [[ -z "$missing" ]]; then
+            printf '依赖阶段 %s 已满足。\n' "$phase" || return 1
+        else
             printf '安装后仍缺少依赖:\n%s\n' "$missing"; return 1;
-        }
+        fi
     fi
     [[ -z "$missing" ]]
 }
@@ -1427,9 +1429,7 @@ require_preview_commands() {
     # anything.  qdisc/service-specific checks still fail closed later when
     # their own command is needed.
     require_file_commands || return 1
-    for cmd in jq; do
-        command_exists "$cmd" || missing+=("$cmd")
-    done
+    command_exists jq || missing+=(jq)
     if (( ${#missing[@]} )); then
         die "缺少 dry-run 预览命令: ${missing[*]}。请先安装发行版提供的 jq。"
         return 1
@@ -1510,9 +1510,7 @@ require_recovery_commands() {
 require_verify_commands() {
     local scope="${1:-all}" missing=() cmd
     require_file_commands || return 1
-    for cmd in jq; do
-        command_exists "$cmd" || missing+=("$cmd")
-    done
+    command_exists jq || missing+=(jq)
     case "$scope" in
         config) command_exists sysctl || missing+=(sysctl) ;;
         path) command_exists ip || missing+=(ip); command_exists tc || missing+=(tc) ;;
@@ -2296,11 +2294,11 @@ cmd_measure() {
                     (( TEST_LOSS_KNOWN )) || udp_metrics_complete=0
                     if (( TEST_LOSS_KNOWN )); then
                         peer_loss_known=1
-                        float_cmp "$TEST_LOSS_PCT" gt "$peer_loss" && peer_loss=$TEST_LOSS_PCT || true
+                        if float_cmp "$TEST_LOSS_PCT" gt "$peer_loss"; then peer_loss=$TEST_LOSS_PCT; fi
                     fi
                     if (( TEST_JITTER_KNOWN )); then
                         peer_jitter_known=1
-                        float_cmp "$TEST_JITTER_MS" gt "$peer_jitter" && peer_jitter=$TEST_JITTER_MS || true
+                        if float_cmp "$TEST_JITTER_MS" gt "$peer_jitter"; then peer_jitter=$TEST_JITTER_MS; fi
                     fi
                 fi
                 # UDP is intentionally sent at a requested datagram rate, so
@@ -3674,8 +3672,8 @@ ensure_secure_state() {
             state_hash_pair_is_valid "$file" "$record" || { die "状态文件哈希或 inode 不一致: $file"; return 1; }
         fi
     done
-    for file in "$RECOVERY_SCRIPT_PATH:$RECOVERY_SCRIPT_HASH_FILE"; do
-        local artifact=${file%%:*} record=${file#*:}
+    local artifact="$RECOVERY_SCRIPT_PATH"
+    record="$RECOVERY_SCRIPT_HASH_FILE"
         if [[ -e "$artifact" || -L "$artifact" || -e "$record" || -L "$record" ]]; then
             if [[ -e "$artifact" || -L "$artifact" ]] && [[ -e "$record" || -L "$record" ]]; then
                 verify_private_hash_record "$artifact" "$record" || {
@@ -3687,7 +3685,6 @@ ensure_secure_state() {
                 die "恢复脚本或哈希记录不完整: $artifact"; return 1
             fi
         fi
-    done
     for file in "$RECOVERY_UNIT_PATH:$RECOVERY_UNIT_HASH_FILE" "$RECOVERY_QDISC_UNIT_PATH:$RECOVERY_QDISC_UNIT_HASH_FILE"; do
         local artifact=${file%%:*} record=${file#*:}
         if [[ -e "$artifact" || -L "$artifact" || -e "$record" || -L "$record" ]]; then
@@ -3718,7 +3715,8 @@ ensure_secure_state() {
     # name used before the baseline directory is published; otherwise a
     # failed first-use publish could remain invisible to later state checks.
     if [[ -e "$STATE_DIR/baseline/initial" || -L "$STATE_DIR/baseline/initial" ]]; then
-        local initial_dir="$STATE_DIR/baseline/initial" initial_identity="$initial_dir/identity.tsv" legacy_identity="$initial_dir/identity.sha256"
+        local initial_dir="$STATE_DIR/baseline/initial"
+        local initial_identity="$initial_dir/identity.tsv" legacy_identity="$initial_dir/identity.sha256"
         [[ -d "$initial_dir" && ! -L "$initial_dir" ]] || { die '首次 baseline 类型不安全。'; return 1; }
         uid=$(stat -c %u "$initial_dir" 2>/dev/null || printf unknown)
         mode=$(stat -c %a "$initial_dir" 2>/dev/null || printf unknown)
@@ -3910,7 +3908,7 @@ restore_runtime_file() {
     [[ -r "$input" ]] || return 1
     while IFS=$'\t' read -r key value; do
         is_target_sysctl_key "$key" || { rc=1; continue; }
-        record_field_is_safe "$key" && record_field_is_safe "$value" || { rc=1; continue; }
+        if ! record_field_is_safe "$key" || ! record_field_is_safe "$value"; then rc=1; continue; fi
         [[ "$value" =~ ^[A-Za-z0-9_.[:space:]-]+$ ]] || { rc=1; continue; }
         sysctl -q -w "$key=$value" >/dev/null 2>&1 || rc=1
     done < "$input"
@@ -4357,9 +4355,9 @@ create_initial_baseline() {
     # replace them; an unmarked file (or any symlink) remains a hard refusal.
     for path in "$SYSCTL_FILE" "$MODULES_FILE"; do
         if [[ -e "$path" || -L "$path" ]]; then
-            [[ -f "$path" && ! -L "$path" ]] && managed_file_is_known_owned "$path" || {
+            if [[ ! -f "$path" || -L "$path" ]] || ! managed_file_is_known_owned "$path"; then
                 die "首次应用前发现无所有权标记的工具路径；无法证明所有权，拒绝接管: $path"; return 1;
-            }
+            fi
         fi
     done
     temp=$(mktemp -d "$STATE_DIR/baseline/.initial.XXXXXXXX") || return 1
@@ -4503,7 +4501,7 @@ transaction_artifacts_are_known() {
 }
 
 transaction_snapshot_is_valid() {
-    local transaction="$1" expected run previous status run_count previous_count key _value extra count=0
+    local transaction="$1" expected mutable_name run previous status run_count previous_count key _value extra count=0
     local mode service apply_pid apply_start qdisc_changed qdisc_iface qdisc_before qdisc_before_spec qdisc_before_hash qdisc_after_hash guard_unit format_version writer_version
     local label path existed hash source identity_record identity_label identity_path identity_existed identity_inode identity_mode identity_hash identity_extra
     local file_record file_label file_path file_existed file_mode file_hash file_extra identity_count=0
@@ -4626,11 +4624,11 @@ transaction_snapshot_is_valid() {
            -f "$transaction/status.sha256" && ! -L "$transaction/status.sha256" ]] || return 1
         verify_private_hash_record "$transaction/meta.tsv" "$transaction/meta.sha256" || return 1
         verify_private_hash_record "$transaction/status" "$transaction/status.sha256" || return 1
-        for expected in changes.tsv apply.warnings; do
-            [[ -f "$transaction/$expected" && ! -L "$transaction/$expected" ]] || return 1
-            secure_private_path "$transaction/$expected" || return 1
-            [[ -f "$transaction/$expected.sha256" && ! -L "$transaction/$expected.sha256" ]] || return 1
-            verify_private_hash_record "$transaction/$expected" "$transaction/$expected.sha256" || return 1
+        for mutable_name in changes.tsv apply.warnings; do
+            [[ -f "$transaction/$mutable_name" && ! -L "$transaction/$mutable_name" ]] || return 1
+            secure_private_path "$transaction/$mutable_name" || return 1
+            [[ -f "$transaction/$mutable_name.sha256" && ! -L "$transaction/$mutable_name.sha256" ]] || return 1
+            verify_private_hash_record "$transaction/$mutable_name" "$transaction/$mutable_name.sha256" || return 1
         done
         if [[ -e "$transaction/apply.json" || -L "$transaction/apply.json" ||
               -e "$transaction/apply.json.sha256" || -L "$transaction/apply.json.sha256" ]]; then
@@ -5242,7 +5240,7 @@ qdisc_fresh_candidate() {
     if ! is_uint "$_rx" || ! is_uint "$tx" || (( _rx != 1 || tx != 1 )); then return 1; fi
     kind=$(interface_qdisc_kind "$iface" 2>/dev/null || true)
     [[ "$kind" == fq || "$kind" == fq_codel || "$kind" == pfifo_fast ]] || return 1
-    roots=$(tc qdisc show dev "$iface" 2>/dev/null | awk '/ root /{n++} END{print n+0}')
+    roots=$(tc qdisc show dev "$iface" 2>/dev/null | awk '/ root([[:space:]]|$)/{n++} END{print n+0}')
     (( roots == 1 )) || return 1
     classes=$(tc class show dev "$iface" 2>/dev/null) || return 1
     filters=$(tc filter show dev "$iface" 2>/dev/null) || return 1
@@ -6750,7 +6748,7 @@ recovery_config_multi_wants_path() {
 systemd_recovery_wants_link_state() {
     local path="$1" expected="$2" parent raw actual expected_real uid mode permissions
     case "$path" in
-        "$(recovery_config_sysctl_wants_path)"|"$(recovery_config_multi_wants_path)"|
+        "$(recovery_config_sysctl_wants_path)"|"$(recovery_config_multi_wants_path)"|\
         "$(recovery_qdisc_online_wants_path)"|"$(recovery_qdisc_multi_wants_path)") ;;
         *) return 1 ;;
     esac
@@ -7754,7 +7752,7 @@ cmd_recover() {
         jq -n --arg schema "$SCHEMA_VERSION" --arg run "$run_id" --arg status "$status" --arg outcome "$outcome" --arg reason "$REASON_CODE" --arg phase "$phase" \
             '{schema_version:$schema,run_id:$run,outcome:$outcome,reason_code:$reason,phase:$phase,rollback_status:$status,warnings:[]}'
     else
-        printf '恢复完成: run=%s status=%s%s\n' "$run_id" "$status" "$([[ $boot_mode == 1 ]] && printf ' (boot)' || true)"
+        printf '恢复完成: run=%s status=%s%s\n' "$run_id" "$status" "$(if [[ $boot_mode == 1 ]]; then printf ' (boot)'; fi)"
     fi
 }
 
@@ -8205,7 +8203,7 @@ cmd_history_prune() {
             *) die "history prune 不支持参数: $arg"; return 1 ;;
         esac
     done
-    is_positive_uint "$keep" && (( keep <= 1000 )) || { die '--keep 必须是 1..1000 的整数。'; return 1; }
+    if ! is_positive_uint "$keep" || (( keep > 1000 )); then die '--keep 必须是 1..1000 的整数。'; return 1; fi
     require_root || return 1
     [[ "$assume_yes" == 1 || "$dry" == 1 ]] || {
         REASON_CODE=history_confirmation_required
@@ -8332,7 +8330,7 @@ cmd_history() {
             *) die "history 不支持参数: $arg"; return 1 ;;
         esac
     done
-    is_positive_uint "$limit" && (( limit <= 1000 )) || { die '--limit 必须是 1..1000 的整数。'; return 1; }
+    if ! is_positive_uint "$limit" || (( limit > 1000 )); then die '--limit 必须是 1..1000 的整数。'; return 1; fi
     require_root || return 1
     if [[ ! -d "$STATE_DIR" || -L "$STATE_DIR" ]]; then
         if (( JSON_OUTPUT )); then
@@ -8684,9 +8682,9 @@ restore_initial_baseline() {
             rc=1
             continue
         fi
-        [[ "$restore_spec" != - ]] && qdisc_spec_is_safe "$restore_spec" || {
+        if [[ "$restore_spec" == - ]] || ! qdisc_spec_is_safe "$restore_spec"; then
             warn "baseline qdisc 缺少安全 replay spec，拒绝恢复: $iface"; rc=1;
-        }
+        fi
     done < "$initial/qdisc.tsv"
     (( rc == 0 )) || return 1
 
@@ -8708,9 +8706,9 @@ restore_initial_baseline() {
         actual_hash=$(qdisc_root_fingerprint "$iface" 2>/dev/null || true)
         [[ "$actual_hash" == "$expected_hash" ]] && continue
         baseline_qdisc_value_is_owned "$iface" "$actual_hash" || { warn "baseline qdisc 在恢复前发生漂移: $iface"; rc=1; continue; }
-        [[ "$restore_spec" != - ]] && qdisc_spec_is_safe "$restore_spec" || {
+        if [[ "$restore_spec" == - ]] || ! qdisc_spec_is_safe "$restore_spec"; then
             warn "baseline qdisc replay spec 在恢复前发生变化: $iface"; rc=1; continue;
-        }
+        fi
         if ! qdisc_replace_from_spec "$iface" "$restore_spec" >/dev/null 2>&1 ||
            [[ "$(qdisc_root_fingerprint "$iface" 2>/dev/null || true)" != "$expected_hash" ]]; then
             warn "baseline qdisc 无法恢复: $iface"
@@ -8912,23 +8910,23 @@ cmd_auto() {
     collect_audit
     if (( json == 0 )); then print_audit_human; fi
     if ! measure_json=$(cmd_measure "${measure_args[@]}" --json); then
-        (( dry )) && auto_preview_dispose || true
+        if (( dry )); then auto_preview_dispose || true; fi
         return 1
     fi
     if ! run_id=$(jq -er '.run_id' <<< "$measure_json"); then
-        (( dry )) && auto_preview_dispose || true
+        if (( dry )); then auto_preview_dispose || true; fi
         die 'auto 测量未返回可用 run_id。'; return 1
     fi
     if ! plan_json=$(cmd_plan --run "$run_id" --json); then
-        (( dry )) && auto_preview_dispose || true
+        if (( dry )); then auto_preview_dispose || true; fi
         return 1
     fi
     confidence=$(jq -r '.confidence' <<< "$plan_json") || {
-        (( dry )) && auto_preview_dispose || true
+        if (( dry )); then auto_preview_dispose || true; fi
         return 1
     }
     retrans_known=$(jq -r '.metrics.retransmits_known // false' <<< "$plan_json") || {
-        (( dry )) && auto_preview_dispose || true
+        if (( dry )); then auto_preview_dispose || true; fi
         return 1
     }
     if (( json == 0 )); then

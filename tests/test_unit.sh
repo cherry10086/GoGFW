@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Pure-function unit tests for vps-proxy-tune.sh.
 # ShellCheck cannot follow test functions passed by name to clean Bash subprocesses.
-# shellcheck disable=SC2329
+# Each test deliberately isolates its globals in a subshell.
+# shellcheck disable=SC2030,SC2031,SC2317,SC2329
 
 set -uo pipefail
 
@@ -97,6 +98,10 @@ assert_output() {
         assert_eq "${expected}" "${actual}" "${description}"
     fi
 }
+
+assert_output dependency_missing 'classifies missing systemctl with a space' reason_code_for_message '需要 systemctl 才能继续'
+assert_success 'main program has valid Bash syntax' bash -n "$PROGRAM"
+assert_output dependency_missing 'classifies missing systemd with a space' reason_code_for_message '需要 systemd 才能继续'
 
 for required_function in \
     validate_peer validate_unit round_pow2 ram_cap_bytes \
@@ -547,6 +552,12 @@ if [[ -d "${parse_tmp}" ]]; then
     )
     assert_success 'baseline identity records content, inode and exact permissions' \
         unit_baseline_identity_roundtrip
+    unit_existing_baseline_state_is_valid() (
+        STATE_DIR="${baseline_state_dir}"
+        ensure_secure_state
+    )
+    assert_success 'state validation resolves an existing baseline identity from its own directory' \
+        unit_existing_baseline_state_is_valid
     unit_baseline_identity_inode_drift() (
         local initial replacement
         STATE_DIR="${baseline_state_dir}"
@@ -568,7 +579,7 @@ if [[ -d "${parse_tmp}" ]]; then
 
     baseline_restore_state="${parse_tmp}-baseline-restore"
     unit_baseline_restore_executes() (
-        local initial value=300 writes=0
+        local initial observed_runtime_value=300 writes=0
         STATE_DIR="${baseline_restore_state}"
         initial="${STATE_DIR}/baseline/initial"
         mkdir -p "${initial}" || return 1
@@ -577,19 +588,19 @@ if [[ -d "${parse_tmp}" ]]; then
         : > "${initial}/qdisc.tsv"
         chmod 0600 "${initial}/runtime.tsv" "${initial}/qdisc.tsv" || return 1
         verify_hash_manifest() { :; }
-        sysctl_read() { printf '%s\n' "${value}"; }
+        sysctl_read() { printf '%s\n' "${observed_runtime_value}"; }
         sysctl() {
             [[ "$3" == net.core.rmem_max=* ]] || return 1
-            value="${3#*=}"
+            observed_runtime_value="${3#*=}"
             writes=$((writes + 1))
         }
         baseline_runtime_value_is_owned() { [[ "$2" == 300 ]]; }
         restore_initial_baseline || return 1
-        [[ "${value}" == 100 && "${writes}" == 1 ]]
+        [[ "${observed_runtime_value}" == 100 && "${writes}" == 1 ]]
     )
     assert_success 'baseline recovery restores authenticated runtime data' unit_baseline_restore_executes
     unit_baseline_restore_drift_stops() (
-        local initial value=300 writes=0
+        local initial observed_runtime_value=300 writes=0
         STATE_DIR="${baseline_restore_state}-drift"
         initial="${STATE_DIR}/baseline/initial"
         mkdir -p "${initial}" || return 1
@@ -598,11 +609,11 @@ if [[ -d "${parse_tmp}" ]]; then
         : > "${initial}/qdisc.tsv"
         chmod 0600 "${initial}/runtime.tsv" "${initial}/qdisc.tsv" || return 1
         verify_hash_manifest() { :; }
-        sysctl_read() { printf '%s\n' "${value}"; }
+        sysctl_read() { printf '%s\n' "${observed_runtime_value}"; }
         sysctl() { writes=$((writes + 1)); }
         baseline_runtime_value_is_owned() { return 1; }
         if restore_initial_baseline; then return 1; fi
-        [[ "${value}" == 300 && "${writes}" == 0 ]]
+        [[ "${observed_runtime_value}" == 300 && "${writes}" == 0 ]]
     )
     assert_success 'baseline recovery refuses to overwrite unowned administrator drift' \
         unit_baseline_restore_drift_stops
@@ -1093,14 +1104,14 @@ assert_failure 'baseline cleanup failure leaves an explicit detectable marker' \
         unit_qdisc_restore_spec
 
     unit_qdisc_retry() (
-        local attempts=0
+        local observed_attempts=0
         restore_transaction() {
-            attempts=$((attempts + 1))
-            (( attempts >= 3 ))
+            observed_attempts=$((observed_attempts + 1))
+            (( observed_attempts >= 3 ))
         }
         sleep() { :; }
         recover_qdisc_phase transaction 1 || return 1
-        [[ "$attempts" == 3 ]]
+        [[ "$observed_attempts" == 3 ]]
     )
     assert_success 'boot qdisc recovery retries bounded network-late failures' unit_qdisc_retry
 
@@ -1376,7 +1387,9 @@ assert_failure 'baseline cleanup failure leaves an explicit detectable marker' \
         validate_transaction_chain() { :; }
         run_directory() { printf '%s\n' "${dry_run_dir}"; }
         verify_hash_manifest() { :; }
-        metric_get() { [[ "$2" == CONFIDENCE ]] && printf 'high\n'; }
+        metric_get() {
+            case "$2" in CONFIDENCE) printf 'high\n' ;; RETRANS_KNOWN) printf '1\n' ;; *) return 1 ;; esac
+        }
         plan_contains_key() { return 1; }
         validate_plan_file() { :; }
         run_measurement_context_is_current() { :; }
@@ -1876,7 +1889,7 @@ if command_exists jq; then
 
     unit_iperf_retrans_fixture() (
         local fixture="$1" reverse="$2" expected_known="$3" expected_retrans="$4" expect_reverse="$5"
-        local tmp line result_file name bps bytes retrans known cv rate saw_reverse=0 status
+        local tmp line result_file name _bps bytes retrans known cv rate saw_reverse=0 status
         tmp=$(mktemp -d /tmp/vps-proxy-tune-iperf-fixture.XXXXXXXX) || return 1
         result_file="$tmp/result.tsv"
         timeout() {
@@ -1899,7 +1912,7 @@ if command_exists jq; then
         rm -f -- "$result_file"
         rmdir -- "$tmp" 2>/dev/null || true
         (( status == 0 )) || return "$status"
-        IFS=$'\t' read -r name bps bytes retrans known cv rate <<< "$line"
+        IFS=$'\t' read -r name _bps bytes retrans known cv rate <<< "$line"
         [[ "$known" == "$expected_known" && "$retrans" == "$expected_retrans" ]] || return 1
         [[ "$saw_reverse" == "$expect_reverse" ]]
     )

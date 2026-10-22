@@ -158,7 +158,10 @@ check_recovery_graph() {
     systemd-analyze verify "$recovery_unit" "$recovery_qdisc_unit" >/dev/null
     grep -Fqx 'Wants=network-online.target' "$recovery_qdisc_unit"
     grep -Fqx 'WantedBy=multi-user.target' "$recovery_qdisc_unit"
-    ! grep -Fqx 'WantedBy=network-online.target' "$recovery_qdisc_unit"
+    if grep -Fqx 'WantedBy=network-online.target' "$recovery_qdisc_unit"; then
+        printf 'qdisc recovery must not be wanted by network-online.target\n' >&2
+        return 1
+    fi
     [[ ! -e "$recovery_qdisc_online_wants" && ! -L "$recovery_qdisc_online_wants" ]]
     [[ -L "$recovery_qdisc_multi_wants" &&
        "$(readlink -f "$recovery_qdisc_multi_wants")" == "$recovery_qdisc_unit" ]]
